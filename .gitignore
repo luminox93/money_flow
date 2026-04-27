@@ -1,8 +1,5 @@
 # Agent instruction/config files
-AGENTS.md
-.agents/
 .agent/
-agent-system/
 
 # Codex / local AI tooling
 .codex/

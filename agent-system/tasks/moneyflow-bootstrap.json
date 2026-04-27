@@ -1,0 +1,33 @@
+{
+  "name": "moneyflow-bootstrap",
+  "goal": "n8n 기반 현금흐름 프로젝트의 초기 세팅과 문서 구조를 만든다.",
+  "constraints": [
+    "인프라는 n8n, postgres, reverse proxy를 기본으로 한다.",
+    "외부 접속 가능한 서버 배포를 전제로 한다.",
+    "문서형 에이전트와 하네스 구조를 함께 남긴다."
+  ],
+  "inputs": [
+    "README.md",
+    "docs/architecture.md",
+    "기획자.md"
+  ],
+  "expectedOutputs": [
+    "기초 인프라 정의",
+    "데이터 스키마 초안",
+    "에이전트 시스템 구조"
+  ],
+  "stages": [
+    {
+      "name": "plan",
+      "agent": "planner"
+    },
+    {
+      "name": "build",
+      "agent": "builder"
+    },
+    {
+      "name": "review",
+      "agent": "reviewer"
+    }
+  ]
+}
