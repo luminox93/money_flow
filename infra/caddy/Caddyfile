@@ -1,0 +1,7 @@
+{$N8N_HOST} {
+  encode gzip zstd
+
+  tls {$CADDY_EMAIL}
+
+  reverse_proxy n8n:5678
+}
