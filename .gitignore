@@ -1,5 +1,7 @@
 # Agent instruction/config files
 .agent/
+agent-system/runs/*
+!agent-system/runs/.gitkeep
 
 # Codex / local AI tooling
 .codex/

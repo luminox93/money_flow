@@ -40,11 +40,21 @@ function Read-JsonFile([string]$Path) {
 }
 
 function Write-JsonFile([string]$Path, $Object) {
-    $Object | ConvertTo-Json -Depth 20 | Set-Content -Path $Path -Encoding utf8
+    $Object | ConvertTo-Json -Depth 30 | Set-Content -Path $Path -Encoding utf8
 }
 
 function Get-Stage($State, [int]$Index) {
     $State.stages[$Index]
+}
+
+function Get-StageIndexByName($State, [string]$Name) {
+    for ($i = 0; $i -lt $State.stages.Count; $i++) {
+        if ($State.stages[$i].name -eq $Name) {
+            return $i
+        }
+    }
+
+    return -1
 }
 
 function New-RunStructure([string]$Id) {
@@ -53,6 +63,59 @@ function New-RunStructure([string]$Id) {
     $null = New-Item -ItemType Directory -Force -Path (Join-Path $runPath "mailboxes")
     $null = New-Item -ItemType Directory -Force -Path (Join-Path $runPath "outputs")
     $null = New-Item -ItemType Directory -Force -Path (Join-Path $runPath "packets")
+}
+
+function Get-PriorArtifactsText($State) {
+    $lines = @()
+    foreach ($stage in $State.stages) {
+        if (-not [string]::IsNullOrWhiteSpace($stage.outputFile)) {
+            $lines += "- $($stage.name) [$($stage.agent)] -> $($stage.outputFile)"
+        }
+    }
+
+    if ($lines.Count -eq 0) {
+        return "- none"
+    }
+
+    return [string]::Join("`n", $lines)
+}
+
+function Get-StageGuidance($Stage) {
+    if ($Stage.name -eq "review") {
+        return "Reviewer output must include a line exactly like 'Verdict: approve' or 'Verdict: revise'."
+    }
+
+    return "Produce the required artifact for this stage using the role document for the current agent."
+}
+
+function New-PacketContent($State, $Stage) {
+@"
+# Agent Packet
+
+Run ID: $($State.runId)
+Task: $($State.taskName)
+Stage: $($Stage.name)
+Agent: $($Stage.agent)
+Attempt: $($Stage.attempt + 1)
+
+## Goal
+$($State.goal)
+
+## Constraints
+$([string]::Join("`n", ($State.constraints | ForEach-Object { "- $_" })))
+
+## Inputs
+$([string]::Join("`n", ($State.inputs | ForEach-Object { "- $_" })))
+
+## Expected Outputs
+$([string]::Join("`n", ($State.expectedOutputs | ForEach-Object { "- $_" })))
+
+## Prior Artifacts
+$(Get-PriorArtifactsText $State)
+
+## Required Result
+$(Get-StageGuidance $Stage)
+"@
 }
 
 function Initialize-Run {
@@ -73,12 +136,22 @@ function Initialize-Run {
 
     $stages = @()
     for ($i = 0; $i -lt $task.stages.Count; $i++) {
+        $routes = @{}
+        if ($null -ne $task.stages[$i].routes) {
+            foreach ($property in $task.stages[$i].routes.PSObject.Properties) {
+                $routes[$property.Name] = $property.Value
+            }
+        }
+
         $stages += [pscustomobject]@{
             name = $task.stages[$i].name
             agent = $task.stages[$i].agent
             status = if ($i -eq 0) { "pending" } else { "blocked" }
             packetFile = ""
             outputFile = ""
+            attempt = 0
+            lastVerdict = ""
+            routes = [pscustomobject]$routes
         }
     }
 
@@ -102,32 +175,6 @@ function Initialize-Run {
     Write-Host "Initialized run: $RunId"
 }
 
-function New-PacketContent($State, $Stage) {
-@"
-# Agent Packet
-
-Run ID: $($State.runId)
-Task: $($State.taskName)
-Stage: $($Stage.name)
-Agent: $($Stage.agent)
-
-## Goal
-$($State.goal)
-
-## Constraints
-$([string]::Join("`n", ($State.constraints | ForEach-Object { "- $_" })))
-
-## Inputs
-$([string]::Join("`n", ($State.inputs | ForEach-Object { "- $_" })))
-
-## Expected Outputs
-$([string]::Join("`n", ($State.expectedOutputs | ForEach-Object { "- $_" })))
-
-## Required Result
-에이전트는 자신의 역할 문서에 따라 이 단계 결과를 작성해야 한다.
-"@
-}
-
 function Dispatch-Stage {
     Ensure-RunId
     $statePath = Get-StatePath $RunId
@@ -144,7 +191,8 @@ function Dispatch-Stage {
         return
     }
 
-    $packetName = ("{0:D2}-{1}-{2}.md" -f ($state.currentStageIndex + 1), $stage.name, $stage.agent)
+    $stage.attempt += 1
+    $packetName = ("{0:D2}-{1}-{2}-a{3:D2}.md" -f ($state.currentStageIndex + 1), $stage.name, $stage.agent, $stage.attempt)
     $packetPath = Join-Path (Join-Path (Get-RunPath $RunId) "packets") $packetName
     $mailboxPath = Join-Path (Join-Path (Join-Path (Get-RunPath $RunId) "mailboxes") $stage.agent) $packetName
 
@@ -160,11 +208,53 @@ function Dispatch-Stage {
         action = "dispatch"
         stage = $stage.name
         agent = $stage.agent
+        attempt = $stage.attempt
         packetFile = $packetPath
     }
 
     Write-JsonFile $statePath $state
-    Write-Host "Dispatched $($stage.name) to $($stage.agent)."
+    Write-Host "Dispatched $($stage.name) to $($stage.agent) attempt $($stage.attempt)."
+}
+
+function Get-VerdictFromFile([string]$Path) {
+    $content = Get-Content $Path
+    foreach ($line in $content) {
+        if ($line -match '^\s*Verdict:\s*(approve|revise)\s*$') {
+            return $Matches[1].ToLowerInvariant()
+        }
+    }
+
+    return ""
+}
+
+function Route-ToStage($State, [string]$RouteTarget) {
+    if ($RouteTarget -eq "complete") {
+        $State.status = "completed"
+        return
+    }
+
+    $targetIndex = Get-StageIndexByName $State $RouteTarget
+    if ($targetIndex -lt 0) {
+        throw "Unknown route target: $RouteTarget"
+    }
+
+    $State.currentStageIndex = $targetIndex
+    for ($i = 0; $i -lt $State.stages.Count; $i++) {
+        $stage = $State.stages[$i]
+        if ($i -lt $targetIndex) {
+            if ($stage.status -ne "completed") {
+                $stage.status = "completed"
+            }
+        }
+        elseif ($i -eq $targetIndex) {
+            $stage.status = "pending"
+        }
+        else {
+            $stage.status = "blocked"
+        }
+    }
+
+    $State.status = "ready"
 }
 
 function Submit-Stage {
@@ -184,9 +274,18 @@ function Submit-Stage {
         throw "Current stage agent is $($stage.agent), not $Agent."
     }
 
-    $destName = ("{0:D2}-{1}-{2}-output.md" -f ($state.currentStageIndex + 1), $stage.name, $stage.agent)
+    $destName = ("{0:D2}-{1}-{2}-a{3:D2}-output.md" -f ($state.currentStageIndex + 1), $stage.name, $stage.agent, $stage.attempt)
     $destPath = Join-Path (Join-Path (Get-RunPath $RunId) "outputs") $destName
     Copy-Item $OutputFile $destPath -Force
+
+    $verdict = ""
+    if ($stage.name -eq "review") {
+        $verdict = Get-VerdictFromFile $destPath
+        if ([string]::IsNullOrWhiteSpace($verdict)) {
+            throw "Reviewer output must contain 'Verdict: approve' or 'Verdict: revise'."
+        }
+        $stage.lastVerdict = $verdict
+    }
 
     $stage.status = "completed"
     $stage.outputFile = $destPath
@@ -196,15 +295,30 @@ function Submit-Stage {
         action = "submit"
         stage = $stage.name
         agent = $stage.agent
+        attempt = $stage.attempt
+        verdict = $verdict
         outputFile = $destPath
     }
 
-    if ($state.currentStageIndex -lt ($state.stages.Count - 1)) {
+    if ($stage.name -eq "review" -and $null -ne $stage.routes) {
+        $routeTarget = $null
+        foreach ($property in $stage.routes.PSObject.Properties) {
+            if ($property.Name -eq $verdict) {
+                $routeTarget = $property.Value
+                break
+            }
+        }
+
+        if ($null -eq $routeTarget) {
+            throw "No route defined for reviewer verdict '$verdict'."
+        }
+
+        Route-ToStage $state $routeTarget
+    }
+    elseif ($state.currentStageIndex -lt ($state.stages.Count - 1)) {
         $state.currentStageIndex += 1
         $nextStage = Get-Stage $state $state.currentStageIndex
-        if ($nextStage.status -eq "blocked") {
-            $nextStage.status = "pending"
-        }
+        $nextStage.status = "pending"
         $state.status = "ready"
     }
     else {

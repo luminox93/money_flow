@@ -1,0 +1,43 @@
+{
+  "name": "mvp-idea-pipeline",
+  "goal": "사용자 아이디어를 받아 MVP 기획, UX 구조, 개발 설계, 리뷰까지 자동 순환한다.",
+  "constraints": [
+    "모든 에이전트는 자신의 md 역할 문서를 기준으로 산출물을 작성한다.",
+    "각 단계 산출물은 다음 단계 packet에 컨텍스트로 전달된다.",
+    "reviewer가 revise를 내리면 developer 단계로 되돌린다.",
+    "최종 승인 전까지 run은 completed가 되지 않는다."
+  ],
+  "inputs": [
+    ".agents/project-planning.md",
+    "README.md",
+    "docs/architecture.md"
+  ],
+  "expectedOutputs": [
+    "MVP 기획 문서",
+    "모바일 우선 화면 구조 문서",
+    "DB 및 n8n 워크플로우 설계 문서",
+    "리뷰 판정 문서"
+  ],
+  "stages": [
+    {
+      "name": "plan",
+      "agent": "product-planner"
+    },
+    {
+      "name": "design",
+      "agent": "designer"
+    },
+    {
+      "name": "build",
+      "agent": "developer"
+    },
+    {
+      "name": "review",
+      "agent": "reviewer",
+      "routes": {
+        "approve": "complete",
+        "revise": "build"
+      }
+    }
+  ]
+}
